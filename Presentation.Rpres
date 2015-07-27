@@ -1,0 +1,169 @@
+Baseball Players Batting Statistics Visualization
+========================================================
+author: Brian Morge
+date: July 26, 2015
+transition: linear
+
+
+This app was created as part of the John's Hopkins [Data Science Specialization](http://www.coursera.org/specialization/jhudatascience/) on Coursera
+
+Introduction
+========================================================
+- View Career Batting Statistics for any in MLB history (AL or NL only).  
+- Compare 2 player's stats in the same year.
+- Or view the MLB league leaders (Top 10's) of a given year.
+- Great for exploring different eras:
+ + Start with a favorite player e.g. Hank Aaron
+ + Find his best years on the Career Statistics Page
+ + Look at the league top 10's for those years to find other players of interest.
+
+```{r Loading,include=FALSE}
+#----------------------------Load and Clean Data------------------------------#
+require(dplyr)
+require(lazyeval)
+require(ggplot2)
+require(scales)
+require(reshape2)
+
+require(Lahman)
+data(Master)
+data(battingLabels)
+bstats <- battingStats()
+bstats <- filter(bstats, is.element(lgID, c("AL","NL")))
+playersubset <- filter(bstats, AB >= 400) %>% (function(x) x[, 'playerID']) %>% unique
+bstats <- filter(bstats, is.element(playerID, playersubset))
+bnames <- transmute(Master, playerID=playerID, 
+                    nameFull=paste(nameLast, nameFirst, sep=', '), 
+                    namePlayer=paste(nameFirst, nameLast))
+bstats <- merge(bstats, bnames)
+allbatLabels <- battingLabels[c(6,8:23),]
+morestats <- as.data.frame(cbind(c('BA', 'PA', 'TB', 'SlugPct', 'OBP', 'OBS', 'BABIP'),
+					  c('Batting Average', 'Plate Appearances', 'Total Bases', 
+					    'Slugging Percentage', 'On-base Percentage', 
+					    'On-base Percentage + Slugging', 'Batting Average on Balls in Play')
+					  ))
+names(morestats) <- names(allbatLabels)
+allbatLabels <- rbind(allbatLabels, morestats)
+
+#----------------------------Function Definitions-----------------------------#
+topten <- function(yearinterest, stat1) {
+    minAB <- filter(bstats, yearID == yearinterest) %>% select(AB) %>% quantile(probs = .6, na.rm=T)
+    sortby <- interp(~desc(var), var = as.name(stat1))
+    bstats %>% filter(yearID == yearinterest, AB > minAB) %>% 
+	arrange_(sortby) %>% 
+	select_("nameFull", stat1) %>% 
+	head(10) -> toptentable
+    names(toptentable) <- c("Player",allbatLabels[allbatLabels[,1]==stat1,2])
+    toptentable
+}
+#-----------------------------------------------------------------------------#
+playercareerPlot <- function(pID, varsofinterest) {
+    player <- filter(bstats, playerID == pID) %>% 
+	select_(.dots = c(varsofinterest, 'yearID'))
+    medyr <- median(player$yearID)
+    n.vars <- length(varsofinterest) 
+    playermax <- data.frame(Max = apply(player, 2, max)[1:n.vars], 
+			    Min = apply(player, 2, min)[1:n.vars], 
+			    variable = varsofinterest, 
+			    medyr = rep(medyr, n.vars))
+    idx <- grep(pID, bnames$playerID)
+    playerName <- bnames$namePlayer[idx]
+    player.long <- melt(player, id.vars='yearID')
+    p <- ggplot(player.long, aes(x = yearID, y = value))
+    ## Test Theming
+    p <- p + theme_minimal() + theme(text = element_text(size = 25, colour = "grey20"))
+    ##
+    p <- p + facet_grid(variable ~ ., scales = "free")
+    p <- p + xlab("Year") + ylab("")
+    p <- p + ggtitle(paste(playerName,"-- Career Statistics\n"))
+    p + geom_line(aes(colour = variable), linetype = 1, size = 3) + 
+	geom_hline(aes(yintercept = Max), data = playermax, 
+		   linetype = 2, size = 3, colour="grey20") + 
+	geom_text(aes(y = Min + (Max - Min) * 1.10, x = medyr, 
+		      label=paste("Career Maximum:", Max)), 
+		      colour="grey20", size=7, fontface = 2, data = playermax)
+}
+#-----------------------------------------------------------------------------#
+playercomparePlot <- function(pID1, pID2, yearofinterest, statsofinterest) {
+    cutoffAB <- filter(bstats, yearID == yearofinterest) %>% select(AB) %>% quantile(probs = .6, na.rm=T)
+    maxes <- (bstats %>% filter(yearID==yearofinterest, AB > cutoffAB) %>% 
+	    select(one_of(statsofinterest)) %>%
+	    apply(2, max, na.rm=T))
+    names(maxes) <- allbatLabels[match(statsofinterest, allbatLabels$variable),2]
+    maxesDf <- data.frame(Max = maxes, variable=statsofinterest)
+    pcompare <- select(filter(bstats, is.element(playerID, c(pID1,pID2)), yearID==yearofinterest), playerID, one_of(statsofinterest))
+    pcompare.long <- melt(pcompare, id.vars='playerID')
+    idx1 <- grep(pID1, bnames$playerID)
+    idx2 <- grep(pID2, bnames$playerID)
+    player1Name <- bnames$namePlayer[idx1]
+    player2Name <- bnames$namePlayer[idx2]
+    p <- ggplot(pcompare.long, aes(x=variable, y=value))
+    p <- p + ggtitle(paste(player1Name, "vs.", player2Name,
+                           "\n",yearofinterest,"Season Comparison\n"))
+    ## Test Theming
+    p <- p + theme_minimal() + theme(text = element_text(size = 25, colour = "grey20"))
+    ##
+    p <- p + facet_wrap(~ variable, nrow = 1, scales = "free") + 
+	xlab('Compared Statistics') + ylab(paste('Statistics from', yearofinterest, 'Season'))
+    p + geom_bar(stat="identity", position = "dodge", aes(fill=playerID)) +
+	geom_hline(aes(yintercept = Max), data = maxesDf, size = 3, colour="grey20") +
+	geom_text(aes(y = Max * 1.05, label=paste("League Most:", Max)), 
+	          colour="grey20", size=7, fontface=2, data = maxesDf)
+}
+#-----------------------------------------------------------------------------#
+fn_playeryears <- function(pID) {
+  bstats %>% select(one_of('yearID', 'playerID')) %>%
+  filter(playerID == pID) %>% (function(x) x[, 'yearID'])
+}
+#-----------------------------------------------------------------------------#
+fn_playedsametime <- function(pID) {
+  bnamesNyrs <- bstats %>% select(one_of('yearID', 'playerID', 'nameFull'))
+  years <- bnamesNyrs %>% filter(playerID == pID) %>% (function(x) x[, 'yearID'])
+  playedsametime <- bnamesNyrs %>% filter(is.element(yearID, years)) %>% 
+    ( function(y) y[, c('playerID', 'nameFull')] ) %>% unique 
+  fullnames <- playedsametime$nameFull
+  playedsametime <- playedsametime$playerID
+  names(playedsametime) <- fullnames
+  playedsametime
+}
+#-----------------------------------------------------------------------------#
+```
+<div class="page">2</div>
+
+Career Summaries and Top10s
+========================================================
+left: 60%
+```{r summary,echo=FALSE,fig.height=7, fig.width=8}
+playercareerPlot('rosepe01', c('H', 'BA'))
+```
+***
+<font size="7">
+```{r topten,echo=FALSE}
+knitr::kable(head(topten(2010,'HR'),5), format = 'html')
+```
+</font>
+<div class="page">3</div>
+
+
+Player Comparisons
+========================================================
+```{r comparisons,echo=FALSE,fig.height=7, fig.width=11}
+playercomparePlot('bondsba01', 
+  'griffke02', 2000, c('H', 'BA', 'HR'))
+```
+<div class="page">4</div>
+
+Conclusion
+========================================================
+This application is a simple tool for visualizing baseball offensive statistics.
+It does not attempt to perform any predictions or sophisticated statistical
+analysis.  
+The purpose is to provide some easy to digest charts that could be
+used to compare players, determine who was the best in a given statistic in a
+season, and to look a player's career arc at a glance.
+
+Links:
+* [Shiny application](http://uncarvedblock.shinyapps.io/baseballapp)
+* [R Presentation](http://rpubs.com/uncarvedblock64/baseballapp) (this document)
+* [Github repository](https://github.com/uncarvedblock64/baseballapp)
+<div class="page">5</div>
